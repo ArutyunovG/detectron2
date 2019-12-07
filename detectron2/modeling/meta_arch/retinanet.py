@@ -60,6 +60,7 @@ class RetinaNet(nn.Module):
     """
 
     def __init__(self, cfg):
+
         super().__init__()
 
         self.device = torch.device(cfg.MODEL.DEVICE)
@@ -82,7 +83,17 @@ class RetinaNet(nn.Module):
 
         backbone_shape = self.backbone.output_shape()
         feature_shapes = [backbone_shape[f] for f in self.in_features]
-        self.head = RetinaNetHead(cfg, feature_shapes)
+
+        num_anchors = build_anchor_generator(cfg, feature_shapes).num_cell_anchors
+
+        self.shared_head = cfg.MODEL.RETINANET.SHARED_HEAD
+        if self.shared_head:
+            self.head = RetinaNetHead(cfg, feature_shapes, num_anchors)
+        else:
+            self.head = nn.ModuleList()
+            for (fs, na) in zip(feature_shapes, num_anchors):
+                self.head.append(RetinaNetHead(cfg, [fs], [na]))
+
         self.anchor_generator = build_anchor_generator(cfg, feature_shapes)
 
         # Matching and loss
@@ -129,7 +140,17 @@ class RetinaNet(nn.Module):
 
         features = self.backbone(images.tensor)
         features = [features[f] for f in self.in_features]
-        box_cls, box_delta = self.head(features)
+
+        box_cls = []
+        box_delta = []
+        if self.shared_head:
+            box_cls, box_delta = self.head(features)
+        else:
+            for i in range(len(self.head)):
+                bc, bd = self.head[i]([features[i]])
+                box_cls.append(bc[0])
+                box_delta.append(bd[0])
+
         anchors = self.anchor_generator(features)
 
         if self.training:
@@ -362,14 +383,14 @@ class RetinaNetHead(nn.Module):
     It has two subnets for the two tasks, with a common structure but separate parameters.
     """
 
-    def __init__(self, cfg, input_shape: List[ShapeSpec]):
+    def __init__(self, cfg, input_shape: List[ShapeSpec], num_anchors):
         super().__init__()
         # fmt: off
         in_channels      = input_shape[0].channels
         num_classes      = cfg.MODEL.RETINANET.NUM_CLASSES
         num_convs        = cfg.MODEL.RETINANET.NUM_CONVS
         prior_prob       = cfg.MODEL.RETINANET.PRIOR_PROB
-        num_anchors      = build_anchor_generator(cfg, input_shape).num_cell_anchors
+
         # fmt: on
         assert (
             len(set(num_anchors)) == 1
