@@ -94,12 +94,19 @@ class DefaultAnchorGenerator(nn.Module):
             sizes *= self.num_features
         if len(aspect_ratios) == 1:
             aspect_ratios *= self.num_features
-        assert self.num_features == len(sizes)
+
+        if isinstance(self, SSDAnchorGenerator):
+            assert self.num_features == len(sizes) - 1
+        else:
+            assert self.num_features == len(sizes)
         assert self.num_features == len(aspect_ratios)
 
-        cell_anchors = [
-            self.generate_cell_anchors(s, a).float() for s, a in zip(sizes, aspect_ratios)
-        ]
+        if isinstance(self, SSDAnchorGenerator):
+            cell_anchors = self.generate_cell_anchors(sizes, aspect_ratios)
+        else:
+            cell_anchors = [
+                self.generate_cell_anchors(s, a).float() for s, a in zip(sizes, aspect_ratios)
+            ]
 
         return BufferList(cell_anchors)
 
@@ -194,6 +201,63 @@ class DefaultAnchorGenerator(nn.Module):
 
         anchors = [copy.deepcopy(anchors_in_image) for _ in range(num_images)]
         return anchors
+
+
+@ANCHOR_GENERATOR_REGISTRY.register()
+class SSDAnchorGenerator(DefaultAnchorGenerator):
+
+    """
+    For a set of image sizes and feature maps, computes a set of anchors for SSD models.
+    """
+
+    def __init__(self, cfg, input_shape: List[ShapeSpec]):
+        super().__init__(cfg, input_shape)
+
+    def generate_cell_anchors(self, sizes, aspect_ratios):
+        def add_anchor_with_wh(w, h):
+            x0, y0, x1, y1 = -w / 2.0, -h / 2.0, w / 2.0, h / 2.0
+            anchors_for_curr_level.append([x0, y0, x1, y1])
+
+        anchors_on_all_levels = []
+
+        for size_idx in range(len(sizes) - 1):
+
+            anchors_for_curr_level = []
+
+            min_size = sizes[size_idx]
+            max_size = sizes[size_idx + 1]
+
+            assert len(min_size) == 1, min_size
+            assert len(max_size) == 1, max_size
+
+            min_size = min_size[0]
+            max_size = max_size[0]
+
+            ar_per_level = aspect_ratios[size_idx]
+
+            if 1.0 in ar_per_level:
+                add_anchor_with_wh(min_size, min_size)
+
+            sqrt_sz = math.sqrt(min_size * max_size)
+            add_anchor_with_wh(sqrt_sz, sqrt_sz)
+
+            eps = 1e-5
+
+            for ar in ar_per_level:
+
+                if abs(ar - 1.0) < eps:
+                    continue
+
+                assert ar > 0, ar
+
+                w = min_size * math.sqrt(ar)
+                h = min_size / math.sqrt(ar)
+
+                add_anchor_with_wh(w, h)
+
+            anchors_on_all_levels.append(torch.tensor(anchors_for_curr_level))
+
+        return anchors_on_all_levels
 
 
 @ANCHOR_GENERATOR_REGISTRY.register()

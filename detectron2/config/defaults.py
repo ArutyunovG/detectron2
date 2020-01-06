@@ -435,6 +435,52 @@ _C.MODEL.RETINANET.FOCAL_LOSS_GAMMA = 2.0
 _C.MODEL.RETINANET.FOCAL_LOSS_ALPHA = 0.25
 _C.MODEL.RETINANET.SMOOTH_L1_LOSS_BETA = 0.1
 
+# ---------------------------------------------------------------------------- #
+# SSD Head
+# ---------------------------------------------------------------------------- #
+_C.MODEL.SSD = CN()
+
+# This is the number of foreground classes.
+_C.MODEL.SSD.NUM_CLASSES = 20
+
+_C.MODEL.SSD.IN_FEATURES = [
+    "conv4_3_norm",
+    "relu7",
+    "conv6_2_relu",
+    "conv7_2_relu",
+    "conv8_2_relu",
+    "conv9_2_relu",
+]
+
+# Convolutions to use in the cls and bbox tower
+# NOTE: this doesn't include the last conv for logits
+_C.MODEL.SSD.NUM_CONVS = 0
+
+# IoU overlap ratio [bg, fg] for labeling anchors.
+# Anchors with < bg are labeled negative (0)
+# Anchors  with >= bg and < fg are ignored (-1)
+# Anchors with >= fg are labeled positive (1)
+_C.MODEL.SSD.IOU_THRESHOLDS = [0.4, 0.5]
+_C.MODEL.SSD.IOU_LABELS = [0, -1, 1]
+
+# Prior prob for rare case (i.e. foreground) at the beginning of training.
+# This is used to set the bias for the logits layer of the classifier subnet.
+# This improves training stability in the case of heavy class imbalance.
+_C.MODEL.SSD.PRIOR_PROB = 0.01
+
+# Inference cls score threshold, only anchors with score > INFERENCE_TH are
+# considered for inference (to improve speed)
+_C.MODEL.SSD.SCORE_THRESH_TEST = 0.05
+_C.MODEL.SSD.TOPK_CANDIDATES_TEST = 1000
+_C.MODEL.SSD.NMS_THRESH_TEST = 0.5
+
+# Weights on (dx, dy, dw, dh) for normalizing SSD anchor regression targets
+_C.MODEL.SSD.BBOX_REG_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
+
+# Loss parameters
+_C.MODEL.SSD.FOCAL_LOSS_GAMMA = 2.0
+_C.MODEL.SSD.FOCAL_LOSS_ALPHA = 0.25
+_C.MODEL.SSD.SMOOTH_L1_LOSS_BETA = 0.1
 
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}

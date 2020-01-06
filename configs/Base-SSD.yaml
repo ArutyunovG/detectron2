@@ -1,0 +1,30 @@
+MODEL:
+  META_ARCHITECTURE: "SSD"
+  BACKBONE:
+    NAME: "build_ssd_vgg_backbone"
+  SSD:
+      NUM_CLASSES: 20
+      NUM_CONVS: 0
+      IN_FEATURES: ["conv4_3_norm", "relu7", "conv6_2_relu","conv7_2_relu", "conv8_2_relu", "conv9_2_relu"]
+      SCORE_THRESH_TEST: 0.5
+      TOPK_CANDIDATES_TEST: 400
+      NMS_THRESH_TEST: 0.45
+      BBOX_REG_WEIGHTS: [10.0, 10.0, 5.0, 5.0]
+  ANCHOR_GENERATOR:
+    NAME: "SSDAnchorGenerator"
+    SIZES: [[30.0], [60.0], [111.0], [162.0], [213.0], [264.0], [315.0]]
+    ASPECT_RATIOS: [[1.0, 2.0, 0.5], [1.0, 2.0, 0.5, 3.0, 0.3333333], [1.0, 2.0, 0.5, 3.0, 0.3333333], [1.0, 2.0, 0.5, 3.0, 0.3333333], [1.0, 2.0, 0.5], [1.0, 2.0, 0.5]]
+    OFFSET: 0.5
+  PIXEL_MEAN: [0.0, 0.0, 0.0]
+SOLVER:
+  BASE_LR: 0.0005
+  CHECKPOINT_PERIOD: 100
+DATASETS:
+  TRAIN: ('voc_2007_trainval', 'voc_2012_trainval')
+  TEST: ('voc_2007_test',)
+INPUT:
+  MIN_SIZE_TEST: 300
+  MIN_SIZE_TRAIN: (300,)
+  MAX_SIZE_TRAIN: 300
+TEST:
+  DETECTIONS_PER_IMAGE: 200
