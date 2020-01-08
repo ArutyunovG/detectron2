@@ -164,7 +164,7 @@ class SSD(nn.Module):
                 "loss_cls" and "loss_box_reg"
         """
         pred_class_logits, pred_anchor_deltas = permute_all_cls_and_box_to_N_HWA_K_and_concat(
-            pred_class_logits, pred_anchor_deltas, self.num_classes
+            pred_class_logits, pred_anchor_deltas, self.num_classes + 1
         )  # Shapes: (N x R, K) and (N x R, 4), respectively.
 
         gt_classes = gt_classes.flatten()
@@ -175,7 +175,7 @@ class SSD(nn.Module):
         num_foreground = foreground_idxs.sum()
 
         gt_classes_target = torch.zeros_like(pred_class_logits)
-        gt_classes_target[foreground_idxs, gt_classes[foreground_idxs]] = 1
+        gt_classes_target[valid_idxs, gt_classes[valid_idxs]] = 1
 
         # logits loss
         loss_cls = sigmoid_focal_loss_jit(
@@ -310,7 +310,7 @@ class SSD(nn.Module):
             # (HxWxAxK,)
 
             box_cls_i = F.softmax(box_cls_i, dim=-1)
-            box_cls_i = box_cls_i[:, 1:]
+            box_cls_i = box_cls_i[:, : -1]
             box_cls_i = box_cls_i.flatten()
 
             # Keep top k top scoring indices only.
