@@ -67,18 +67,22 @@ class SSD(nn.Module):
         self.device = torch.device(cfg.MODEL.DEVICE)
 
         # fmt: off
-        self.num_classes              = cfg.MODEL.SSD.NUM_CLASSES
-        self.in_features              = cfg.MODEL.SSD.IN_FEATURES
+        self.num_classes                 = cfg.MODEL.SSD.NUM_CLASSES
+        self.in_features                 = cfg.MODEL.SSD.IN_FEATURES
         # Loss parameters:
-        self.focal_loss_alpha         = cfg.MODEL.SSD.FOCAL_LOSS_ALPHA
-        self.focal_loss_gamma         = cfg.MODEL.SSD.FOCAL_LOSS_GAMMA
-        self.smooth_l1_loss_beta      = cfg.MODEL.SSD.SMOOTH_L1_LOSS_BETA
+        self.loss_name                   = cfg.MODEL.SSD.LOSS_NAME
+        self.focal_loss_alpha            = cfg.MODEL.SSD.FOCAL_LOSS_ALPHA
+        self.focal_loss_gamma            = cfg.MODEL.SSD.FOCAL_LOSS_GAMMA
+        self.multibox_loss_neg_pos_ratio = cfg.MODEL.SSD.MULTIBOX_LOSS_NEG_POS_RATIO
+        self.smooth_l1_loss_beta         = cfg.MODEL.SSD.SMOOTH_L1_LOSS_BETA
         # Inference parameters:
-        self.score_threshold          = cfg.MODEL.SSD.SCORE_THRESH_TEST
-        self.topk_candidates          = cfg.MODEL.SSD.TOPK_CANDIDATES_TEST
-        self.nms_threshold            = cfg.MODEL.SSD.NMS_THRESH_TEST
-        self.max_detections_per_image = cfg.TEST.DETECTIONS_PER_IMAGE
+        self.score_threshold             = cfg.MODEL.SSD.SCORE_THRESH_TEST
+        self.topk_candidates             = cfg.MODEL.SSD.TOPK_CANDIDATES_TEST
+        self.nms_threshold               = cfg.MODEL.SSD.NMS_THRESH_TEST
+        self.max_detections_per_image    = cfg.TEST.DETECTIONS_PER_IMAGE
         # fmt: on
+
+        assert self.loss_name in ["Focal", "Multibox"], self.loss_name
 
         self.backbone = build_backbone(cfg)
 
@@ -163,6 +167,10 @@ class SSD(nn.Module):
                 storing the loss. Used during training only. The dict keys are:
                 "loss_cls" and "loss_box_reg"
         """
+
+        # we need batch size to compute amount of hard negatives
+        batch_size = pred_class_logits[0].shape[0]
+
         pred_class_logits, pred_anchor_deltas = permute_all_cls_and_box_to_N_HWA_K_and_concat(
             pred_class_logits, pred_anchor_deltas, self.num_classes + 1
         )  # Shapes: (N x R, K) and (N x R, 4), respectively.
@@ -172,19 +180,53 @@ class SSD(nn.Module):
 
         valid_idxs = gt_classes >= 0
         foreground_idxs = (gt_classes >= 0) & (gt_classes != self.num_classes)
+        background_idxs = (gt_classes == self.num_classes)
         num_foreground = foreground_idxs.sum()
 
-        gt_classes_target = torch.zeros_like(pred_class_logits)
-        gt_classes_target[valid_idxs, gt_classes[valid_idxs]] = 1
+        if self.loss_name == "Focal":
 
-        # logits loss
-        loss_cls = sigmoid_focal_loss_jit(
-            pred_class_logits[valid_idxs],
-            gt_classes_target[valid_idxs],
-            alpha=self.focal_loss_alpha,
-            gamma=self.focal_loss_gamma,
-            reduction="sum",
-        ) / max(1, num_foreground)
+            gt_classes_target = torch.zeros_like(pred_class_logits)
+            gt_classes_target[valid_idxs, gt_classes[valid_idxs]] = 1
+
+            # logits loss
+            loss_cls = sigmoid_focal_loss_jit(
+                pred_class_logits[valid_idxs],
+                gt_classes_target[valid_idxs],
+                alpha=self.focal_loss_alpha,
+                gamma=self.focal_loss_gamma,
+                reduction="sum",
+            ) / max(1, num_foreground)
+
+        else:
+
+            assert self.loss_name == "Multibox", self.loss_name
+
+            softmax_ce = F.cross_entropy(pred_class_logits[valid_idxs],
+                                         gt_classes[valid_idxs],
+                                         reduction = 'none')
+
+            loss_for_all_indices = torch.zeros_like(pred_class_logits[:, 1])
+            loss_for_all_indices[valid_idxs] = softmax_ce
+
+            loss_for_neg_indices = torch.zeros_like(loss_for_all_indices)
+            loss_for_neg_indices[background_idxs] = loss_for_all_indices[background_idxs]
+            loss_for_neg_indices = loss_for_neg_indices.view(batch_size, -1)
+
+            # argsort twice gets position of element in sorted array
+            # since loss is taken with minus, the rank == 0 is the biggest loss and so on
+            rank = (-loss_for_neg_indices).argsort(axis = -1).argsort(axis = -1)
+            num_foreground_per_img = foreground_idxs.view(batch_size, -1).sum(1, keepdim = True)
+
+            hard_negative = rank < (self.multibox_loss_neg_pos_ratio * num_foreground_per_img)
+
+            # back to single dimension
+            hard_negative = hard_negative.view(-1)
+
+            # Make sure hard negatives are actually negatives
+            hard_negative = hard_negative & background_idxs
+
+            loss_for_all_indices[~ (hard_negative | foreground_idxs)] = 0
+            loss_cls = loss_for_all_indices[valid_idxs].sum(0, keepdims = False) / max(1, num_foreground)
 
         # regression loss
         loss_box_reg = smooth_l1_loss(

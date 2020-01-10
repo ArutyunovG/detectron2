@@ -478,9 +478,17 @@ _C.MODEL.SSD.NMS_THRESH_TEST = 0.5
 _C.MODEL.SSD.BBOX_REG_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
 
 # Loss parameters
+
+# Allowed values for loss name are "Multibox" or "Focal"
+# "Multibox" loss is MultiboxLossLayer from Caffe with MAX_NEGATIVE mining_type
+# "Focal" stands for Focal loss
+_C.MODEL.SSD.LOSS_NAME="Multibox"
 _C.MODEL.SSD.FOCAL_LOSS_GAMMA = 2.0
 _C.MODEL.SSD.FOCAL_LOSS_ALPHA = 0.25
-_C.MODEL.SSD.SMOOTH_L1_LOSS_BETA = 0.1
+# Maximum value of neg / pos anchors fraction
+_C.MODEL.SSD.MULTIBOX_LOSS_NEG_POS_RATIO=3.0
+# Box loss is always SmoothL1, regardless of conf loss
+_C.MODEL.SSD.SMOOTH_L1_LOSS_BETA = 1.0
 
 # ---------------------------------------------------------------------------- #
 # ResNe[X]t options (ResNets = {ResNet, ResNeXt}
