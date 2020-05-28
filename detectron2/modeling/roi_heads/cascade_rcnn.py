@@ -9,11 +9,13 @@ from detectron2.layers import ShapeSpec
 from detectron2.structures import Boxes, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 
+import detectron2
+
 from ..box_regression import Box2BoxTransform
 from ..matcher import Matcher
 from ..poolers import ROIPooler
 from .box_head import build_box_head
-from .fast_rcnn import FastRCNNOutputLayers, fast_rcnn_inference
+from .fast_rcnn import FastRCNNOutputLayers
 from .roi_heads import ROI_HEADS_REGISTRY, StandardROIHeads
 
 
@@ -195,7 +197,7 @@ class CascadeROIHeads(StandardROIHeads):
             # Use the boxes of the last head
             predictor, predictions, proposals = head_outputs[-1]
             boxes = predictor.predict_boxes(predictions, proposals)
-            pred_instances, _ = fast_rcnn_inference(
+            pred_instances, _ = detectron2.modeling.roi_heads.fast_rcnn.fast_rcnn_inference(
                 boxes,
                 scores,
                 image_sizes,
@@ -270,7 +272,8 @@ class CascadeROIHeads(StandardROIHeads):
         # but scale up the parameter gradients of the heads.
         # This is equivalent to adding the losses among heads,
         # but scale down the gradients on features.
-        box_features = _ScaleGradient.apply(box_features, 1.0 / self.num_cascade_stages)
+        if self.training:
+            box_features = _ScaleGradient.apply(box_features, 1.0 / self.num_cascade_stages)
         box_features = self.box_head[stage](box_features)
         return self.box_predictor[stage](box_features)
 

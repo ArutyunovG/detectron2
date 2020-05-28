@@ -342,6 +342,89 @@ class Caffe2ROIPooler(Caffe2Compatible, poolers.ROIPooler):
         return roi_feat
 
 
+class Caffe2FastRCNNOutputsPredictBoxes:
+    def __init__(self, tensor_mode):
+        self.tensor_mode = tensor_mode  # whether the output is caffe2 tensor mode
+        self.image_size = None
+
+    roi_batch_splits_g = None
+
+    def __call__(self, box_predictor, predictions, proposals):
+        """ equivalent to FastRCNNOutputLayers.inference """
+
+        is_rotated = len(box_predictor.box2box_transform.weights) == 5
+
+        if is_rotated:
+            box_dim = 5
+            assert box_predictor.box2box_transform.weights[4] == 1, (
+                "The weights for Rotated BBoxTransform in C2 have only 4 dimensions,"
+                + " thus enforcing the angle weight to be 1 for now"
+            )
+            box2box_transform_weights = box_predictor.box2box_transform.weights[:4]
+        else:
+            box_dim = 4
+            box2box_transform_weights = box_predictor.box2box_transform.weights
+
+        _, box_regression = predictions
+
+        assert box_regression.shape[1] % box_dim == 0
+
+        rois = proposals[0].proposal_boxes.tensor
+        device = rois.device
+
+        if self.image_size is None:
+            self.image_size = proposals[0].im_info
+
+        roi_pred_bbox, roi_batch_splits = torch.ops._caffe2.BBoxTransform(
+            to_device(rois, "cpu"),
+            to_device(box_regression, "cpu"),
+            to_device(self.image_size, "cpu"),
+            weights=box2box_transform_weights,
+            apply_scale=True,
+            rotated=is_rotated,
+            angle_bound_on=True,
+            angle_bound_lo=-180,
+            angle_bound_hi=180,
+            clip_angle_thresh=1.0,
+            legacy_plus_one=False,
+        )
+
+        Caffe2FastRCNNOutputsPredictBoxes.roi_batch_splits_g = roi_batch_splits
+
+        roi_pred_bbox = to_device(roi_pred_bbox, device)
+
+        return [roi_pred_bbox]
+
+class Caffe2CascadeRCNNPredictProbs:
+
+    def __init__(self, tensor_mode):
+        self.tensor_mode = tensor_mode
+
+    def __call__(self, box_predictor, predictions, proposals):
+        """ equivalent to FastRCNNOutputLayers.predict_probs """
+        scores, _ = predictions
+        probs = F.softmax(scores, dim=-1)
+        return [probs]
+
+
+class Caffe2CascadeRCNN_create_proposals_from_boxes:
+
+    def __call__(self, cascade_head, boxes, image_sizes):
+        # Just like RPN, the proposals should not have gradients
+        boxes = [Caffe2Boxes(b.detach()) for b in boxes]
+        proposals = []
+        for boxes_per_image, image_size in zip(boxes, image_sizes):
+            boxes_per_image.clip(image_size)
+            if cascade_head.training:
+                # do not filter empty boxes at inference time,
+                # because the scores from each stage need to be aligned and added later
+                boxes_per_image = boxes_per_image[boxes_per_image.nonempty()]
+            prop = Instances(image_size)
+            prop.proposal_boxes = boxes_per_image
+            proposals.append(prop)
+        return proposals
+
+
 class Caffe2FastRCNNOutputsInference:
     def __init__(self, tensor_mode):
         self.tensor_mode = tensor_mode  # whether the output is caffe2 tensor mode
@@ -478,6 +561,79 @@ class Caffe2MaskRCNNInference:
             pred_instances[0].pred_masks = mask_probs_pred
         else:
             mask_rcnn_inference(pred_mask_logits, pred_instances)
+
+class Caffe2FastRCNNInferenceFunction:
+    def __call__(self, boxes, scores, image_shapes, score_thresh, nms_thresh, topk_per_image):
+        """ equivalent to fast_rcnn.fast_rcnn_inference """
+
+        roi_batch_splits = Caffe2FastRCNNOutputsPredictBoxes.roi_batch_splits_g
+        is_rotated = (boxes[0].shape[1].item() == 5)
+        cls_agnostic_bbox_reg = True
+
+        assert len(scores) == 1
+        assert len(boxes) == 1
+
+        device, dtype = boxes[0].device, boxes[0].dtype
+
+        nms_outputs = torch.ops._caffe2.BoxWithNMSLimit(
+            to_device(scores[0], "cpu"),
+            to_device(boxes[0], "cpu"),
+            to_device(roi_batch_splits, "cpu"),
+            score_thresh=float(score_thresh),
+            nms=float(nms_thresh),
+            detections_per_im=int(topk_per_image),
+            soft_nms_enabled=False,
+            soft_nms_method="linear",
+            soft_nms_sigma=0.5,
+            soft_nms_min_score_thres=0.001,
+            rotated=is_rotated,
+            cls_agnostic_bbox_reg=cls_agnostic_bbox_reg,
+            input_boxes_include_bg_cls=False,
+            output_classes_include_bg_cls=False,
+            legacy_plus_one=False,
+        )
+        roi_score_nms = to_device(nms_outputs[0], device)
+        roi_bbox_nms = to_device(nms_outputs[1], device)
+        roi_class_nms = to_device(nms_outputs[2], device)
+        roi_batch_splits_nms = to_device(nms_outputs[3], device)
+        roi_keeps_nms = to_device(nms_outputs[4], device)
+        roi_keeps_size_nms = to_device(nms_outputs[5], device)
+
+        roi_batch_ids = cat(
+            [
+                torch.full((b, 1), i, dtype=dtype, device=device)
+                for i, b in enumerate(int(x.item()) for x in roi_batch_splits_nms)
+            ],
+            dim=0,
+        )
+
+        roi_class_nms = alias(roi_class_nms, "class_nms")
+        roi_score_nms = alias(roi_score_nms, "score_nms")
+        roi_bbox_nms = alias(roi_bbox_nms, "bbox_nms")
+        roi_batch_splits_nms = alias(roi_batch_splits_nms, "batch_splits_nms")
+        roi_keeps_nms = alias(roi_keeps_nms, "keeps_nms")
+        roi_keeps_size_nms = alias(roi_keeps_size_nms, "keeps_size_nms")
+
+        assert len(image_shapes) == 1
+
+        im_info = torch.Tensor(
+            [[image_shapes[0][0], image_shapes[0][1], 1.0]]
+        )
+
+        results = InstancesList(
+            im_info=im_info,
+            indices=roi_batch_ids[:, 0],
+            extra_fields={
+                "pred_boxes": Caffe2Boxes(roi_bbox_nms),
+                "scores": roi_score_nms,
+                "pred_classes": roi_class_nms,
+            },
+        )
+
+        results = [results]
+        kept_indices = [roi_keeps_nms]
+
+        return results, kept_indices
 
 
 class Caffe2KeypointRCNNInference:

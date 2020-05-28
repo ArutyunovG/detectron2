@@ -8,12 +8,17 @@ from detectron2.modeling import poolers
 from detectron2.modeling.proposal_generator import rpn
 from detectron2.modeling.roi_heads import keypoint_head, mask_head
 from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
+from detectron2.modeling.roi_heads.cascade_rcnn import CascadeROIHeads
 
 from .c10 import (
     Caffe2Compatible,
     Caffe2FastRCNNOutputsInference,
+    Caffe2FastRCNNOutputsPredictBoxes,
+    Caffe2CascadeRCNNPredictProbs,
+    Caffe2CascadeRCNN_create_proposals_from_boxes,
     Caffe2KeypointRCNNInference,
     Caffe2MaskRCNNInference,
+    Caffe2FastRCNNInferenceFunction,
     Caffe2ROIPooler,
     Caffe2RPN,
 )
@@ -89,6 +94,58 @@ def mock_fastrcnn_outputs_inference(
     if check:
         assert mocked_func.call_count > 0
 
+@contextlib.contextmanager
+def mock_fastrcnn_predict_boxes(
+    tensor_mode, check=True, box_predictor_type=FastRCNNOutputLayers
+):
+    with mock.patch.object(
+        box_predictor_type,
+        "predict_boxes",
+        autospec=True,
+        side_effect=Caffe2FastRCNNOutputsPredictBoxes(tensor_mode),
+    ) as mocked_func:
+        yield
+    if check:
+        assert mocked_func.call_count > 0
+
+@contextlib.contextmanager
+def mock_fastrcnn_predict_probs(
+    tensor_mode, check=True, box_predictor_type=FastRCNNOutputLayers
+):
+    with mock.patch.object(
+        box_predictor_type,
+        "predict_probs",
+        autospec=True,
+        side_effect=Caffe2CascadeRCNNPredictProbs(tensor_mode),
+    ) as mocked_func:
+        yield
+    if check:
+        assert mocked_func.call_count > 0
+
+@contextlib.contextmanager
+def mock_cascade_head_create_proposals_from_boxes(
+    tensor_mode, check=True, box_head_type=CascadeROIHeads
+):
+    with mock.patch.object(
+        box_head_type,
+        "_create_proposals_from_boxes",
+        autospec=True,
+        side_effect=Caffe2CascadeRCNN_create_proposals_from_boxes(),
+    ) as mocked_func:
+        yield
+    if check:
+        assert mocked_func.call_count > 0
+
+
+@contextlib.contextmanager
+def mock_fastrcnn_inference_function(tensor_mode, patched_module, check=True):
+    with mock.patch(
+        "{}.fast_rcnn_inference".format(patched_module), side_effect=Caffe2FastRCNNInferenceFunction()
+    ) as mocked_func:
+        yield
+    if check:
+        assert mocked_func.call_count > 0
+
 
 @contextlib.contextmanager
 def mock_mask_rcnn_inference(tensor_mode, patched_module, check=True):
@@ -98,7 +155,6 @@ def mock_mask_rcnn_inference(tensor_mode, patched_module, check=True):
         yield
     if check:
         assert mocked_func.call_count > 0
-
 
 @contextlib.contextmanager
 def mock_keypoint_rcnn_inference(tensor_mode, patched_module, use_heatmap_max_keypoint, check=True):
@@ -130,14 +186,42 @@ class ROIHeadsPatcher:
         # are called inside the same file as BaseXxxHead due to using mock.patch.
         kpt_heads_mod = keypoint_head.BaseKeypointRCNNHead.__module__
         mask_head_mod = mask_head.BaseMaskRCNNHead.__module__
+        fast_rcnn_mod = FastRCNNOutputLayers.__module__
 
-        mock_ctx_managers = [
-            mock_fastrcnn_outputs_inference(
-                tensor_mode=tensor_mode,
-                check=True,
-                box_predictor_type=type(self.heads.box_predictor),
-            )
-        ]
+        mock_ctx_managers = []
+        if isinstance(self.heads.box_predictor, torch.nn.ModuleList):
+            for module in self.heads.box_predictor:
+                mock_ctx_managers += [
+                    mock_fastrcnn_predict_boxes(
+                        tensor_mode=tensor_mode,
+                        check=True,
+                        box_predictor_type=type(module),
+                    )]
+                mock_ctx_managers += [
+                    mock_fastrcnn_predict_probs(
+                        tensor_mode=tensor_mode,
+                        check=True,
+                        box_predictor_type=type(module),
+                    )]
+                mock_ctx_managers += [
+                    mock_fastrcnn_inference_function(tensor_mode, fast_rcnn_mod)
+                ]
+                mock_ctx_managers += [
+                    mock_cascade_head_create_proposals_from_boxes(
+                        tensor_mode=tensor_mode,
+                        check=True,
+                        box_head_type=CascadeROIHeads,
+                    )]
+                break
+        else:
+            mock_ctx_managers += [
+                mock_fastrcnn_outputs_inference(
+                    tensor_mode=tensor_mode,
+                    check=True,
+                    box_predictor_type=type(self.heads.box_predictor),
+                )
+            ]
+
         if getattr(self.heads, "keypoint_on", False):
             mock_ctx_managers += [
                 mock_keypoint_rcnn_inference(

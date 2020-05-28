@@ -267,6 +267,12 @@ class Caffe2GeneralizedRCNN(Caffe2MetaArch):
         images = self._caffe2_preprocess_image(inputs)
         features = self._wrapped_model.backbone(images.tensor)
         proposals, _ = self._wrapped_model.proposal_generator(images, features)
+
+        if isinstance(self._wrapped_model.roi_heads.box_head, torch.nn.ModuleList):
+            assert len(proposals) == 1
+            image_size_tensor = proposals[0].image_size
+            proposals[0].image_size = (image_size_tensor[0, 0].item(), image_size_tensor[0, 1].item())
+
         with self.roi_heads_patcher.mock_roi_heads():
             detector_results, _ = self._wrapped_model.roi_heads(images, features, proposals)
         return tuple(detector_results[0].flatten())
